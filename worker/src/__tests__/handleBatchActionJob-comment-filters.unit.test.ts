@@ -121,7 +121,12 @@ describe("event batch-action comment filter wiring", () => {
         value: "review me",
       },
     ];
-    const query = { filter: rawFilter, orderBy: null };
+    const query = {
+      filter: rawFilter,
+      orderBy: { column: "name", order: "ASC" as const },
+      searchQuery: "review",
+      searchType: ["content" as const],
+    };
     const originalQuery = structuredClone(query);
     const resolvedFilter = [
       {
@@ -156,7 +161,12 @@ describe("event batch-action comment filter wiring", () => {
       objectType: "OBSERVATION",
     });
     expect(mocks.getEventsStreamForAnnotationQueue).toHaveBeenCalledWith(
-      expect.objectContaining({ filter: resolvedFilter }),
+      expect.objectContaining({
+        filter: resolvedFilter,
+        orderBy: query.orderBy,
+        searchQuery: query.searchQuery,
+        searchType: query.searchType,
+      }),
     );
     expect(query).toEqual(originalQuery);
   });
@@ -171,7 +181,9 @@ describe("event batch-action comment filter wiring", () => {
           value: 0,
         },
       ],
-      orderBy: null,
+      orderBy: { column: "name", order: "DESC" as const },
+      searchQuery: "dataset candidate",
+      searchType: ["id" as const, "content" as const],
     };
     const originalQuery = structuredClone(query);
     mocks.applyCommentFilters.mockResolvedValue({
@@ -203,6 +215,9 @@ describe("event batch-action comment filter wiring", () => {
             value: [],
           },
         ],
+        orderBy: query.orderBy,
+        searchQuery: query.searchQuery,
+        searchType: query.searchType,
       }),
     );
     expect(query).toEqual(originalQuery);
@@ -264,7 +279,12 @@ describe("event batch-action comment filter wiring", () => {
         value: "evaluate",
       },
     ];
-    const query = { filter: rawFilter, orderBy: null };
+    const query = {
+      filter: rawFilter,
+      orderBy: { column: "startTime", order: "ASC" as const },
+      searchQuery: "evaluate",
+      searchType: ["content" as const],
+    };
     const originalQuery = structuredClone(query);
     const resolvedFilter = [
       {
@@ -305,7 +325,12 @@ describe("event batch-action comment filter wiring", () => {
     } as never);
 
     expect(mocks.getEventsStreamForEval).toHaveBeenCalledWith(
-      expect.objectContaining({ filter: resolvedFilter }),
+      expect.objectContaining({
+        filter: resolvedFilter,
+        orderBy: query.orderBy,
+        searchQuery: query.searchQuery,
+        searchType: query.searchType,
+      }),
     );
     expect(mocks.processBatchedObservationEval).toHaveBeenCalledWith(
       expect.objectContaining({
