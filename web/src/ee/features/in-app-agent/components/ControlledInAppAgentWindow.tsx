@@ -5,6 +5,7 @@ import { useRouter } from "next/router";
 import { InAppAgentWindow } from "./InAppAgentWindow";
 import type { InAppAgentWindowConversation } from "./InAppAgentWindow";
 import { useInAppAiAgent } from "./InAppAiAgentProvider";
+import { useSmoothStreamingMessages } from "./useSmoothStreamingMessages";
 import { getDrawerMessages } from "./utils/utils";
 import { getInAppAgentScreenContextDescription } from "@/src/ee/features/in-app-agent/context";
 
@@ -33,6 +34,23 @@ type ControlledInAppAgentWindowProps = ControlledInAppAgentWindowBaseProps &
 export function ControlledInAppAgentWindow(
   props: ControlledInAppAgentWindowProps,
 ) {
+  const agent = useInAppAiAgent();
+
+  return (
+    <ControlledInAppAgentWindowInner
+      key={agent.selectedConversationId ?? "new-conversation"}
+      agent={agent}
+      {...props}
+    />
+  );
+}
+
+function ControlledInAppAgentWindowInner({
+  agent,
+  ...props
+}: ControlledInAppAgentWindowProps & {
+  agent: ReturnType<typeof useInAppAiAgent>;
+}) {
   const router = useRouter();
   const {
     conversations,
@@ -44,6 +62,7 @@ export function ControlledInAppAgentWindow(
     isSubmitting,
     invalidateConversations,
     loadMoreConversations,
+    liveMessageVersion,
     messages,
     pendingToolApprovals,
     approveToolCall,
@@ -53,9 +72,12 @@ export function ControlledInAppAgentWindow(
     selectedConversationIsWriteLocked,
     submit,
     submitFeedback,
-  } = useInAppAiAgent();
+  } = agent;
+  const { isAnimating, messages: displayedMessages } =
+    useSmoothStreamingMessages(messages, liveMessageVersion, error !== null);
   const isInputDisabled =
     isRunning ||
+    isAnimating ||
     isSubmitting ||
     selectedConversationIsWriteLocked ||
     isSelectedConversationHydrating ||
@@ -75,11 +97,11 @@ export function ControlledInAppAgentWindow(
     () =>
       getDrawerMessages({
         error,
-        isRunning,
-        messages,
+        isRunning: isRunning || isAnimating,
+        messages: displayedMessages,
         pendingToolApprovals,
       }),
-    [error, isRunning, messages, pendingToolApprovals],
+    [displayedMessages, error, isAnimating, isRunning, pendingToolApprovals],
   );
 
   const closeButtonProps =
@@ -90,7 +112,9 @@ export function ControlledInAppAgentWindow(
   return (
     <InAppAgentWindow
       error={displayError}
-      isAssistantTurnInProgress={isRunning || pendingToolApprovals.length > 0}
+      isAssistantTurnInProgress={
+        isRunning || isAnimating || pendingToolApprovals.length > 0
+      }
       isHeaderDragHandleEnabled={props.isHeaderDragHandleEnabled}
       isExpanded={props.isExpanded}
       isInputDisabled={isInputDisabled}
