@@ -28,7 +28,7 @@ export function InAppAgentToolPayload({
 
   return (
     <div className="space-y-1">
-      <p className="text-muted-foreground text-xs font-medium">{label}</p>
+      <p className="text-muted-foreground text-xs font-bold">{label}</p>
       <pre
         className={cn(
           "bg-muted text-muted-foreground max-h-64 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap",

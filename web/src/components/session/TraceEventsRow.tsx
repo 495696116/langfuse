@@ -44,7 +44,7 @@ const openSessionViewMenu = () => {
  */
 const ViewMismatchNotice = ({ viewLabel }: { viewLabel: string | null }) => (
   <div className="flex flex-col items-start gap-1.5 rounded-md border border-dashed border-amber-500/50 bg-amber-500/5 p-3">
-    <div className="flex items-center gap-2 text-xs font-medium text-amber-700 dark:text-amber-500">
+    <div className="flex items-center gap-2 text-xs font-bold text-amber-700 dark:text-amber-500">
       <FilterX className="h-3.5 w-3.5 shrink-0" />
       {viewLabel
         ? `No observation matches the "${viewLabel}" view in this trace`
@@ -264,7 +264,7 @@ export const TraceEventsRow = React.memo(
                   >
                     <ItemBadge type="TRACE" isSmall />
                     <div className="flex flex-col">
-                      <span className="text-xs font-medium">
+                      <span className="text-xs font-bold">
                         {trace.name ?? "Trace"} ({trace.id})&nbsp;↗
                       </span>
                       <span className="text-muted-foreground text-xs">
@@ -315,7 +315,7 @@ export const TraceEventsRow = React.memo(
                   </div>
                 </div>
                 <div className="flex-1">
-                  <p className="mb-1 font-medium">Scores</p>
+                  <p className="mb-1 font-bold">Scores</p>
                   <div className="flex flex-wrap content-start items-start gap-1">
                     <GroupedScoreBadges scores={trace.scores} />
                   </div>

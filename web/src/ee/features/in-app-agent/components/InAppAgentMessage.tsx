@@ -333,7 +333,7 @@ function InAppAgentReasoningBlock({
     >
       <summary
         className={cn(
-          "hover:text-foreground focus-visible:ring-ring flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md px-1 py-0.5 text-xs leading-none font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden",
+          "hover:text-foreground focus-visible:ring-ring flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md px-1 py-0.5 text-xs leading-none font-bold outline-none focus-visible:ring-2 focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden",
           isCompact && "px-0.5",
         )}
       >
@@ -563,7 +563,7 @@ function SourcesPopover({
         <button
           type="button"
           className={cn(
-            "text-muted-foreground/70 hover:text-muted-foreground inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium",
+            "text-muted-foreground/70 hover:text-muted-foreground inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-bold",
             isCompact && "py-0.5",
           )}
         >
@@ -609,7 +609,7 @@ const CommentButton = forwardRef<
       ref={ref}
       type="button"
       className={cn(
-        "text-muted-foreground hover:text-foreground flex items-center gap-1 rounded-md border px-1.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60",
+        "text-muted-foreground hover:text-foreground flex items-center gap-1 rounded-md border px-1.5 py-1 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-60",
         className,
       )}
       {...props}
@@ -691,7 +691,7 @@ function ToolCallGroup({
     <details className="group/tool-group min-w-0">
       <summary
         className={cn(
-          "flex cursor-pointer list-none items-center gap-2 text-xs leading-none font-medium [&::-webkit-details-marker]:hidden",
+          "flex cursor-pointer list-none items-center gap-2 text-xs leading-none font-bold [&::-webkit-details-marker]:hidden",
           paddingX,
         )}
       >
@@ -725,7 +725,7 @@ function ToolCallGroup({
           return (
             <div key={`${tool.name}-${index}`} className="rounded-lg">
               <details className="group/tool min-w-0">
-                <summary className="flex cursor-pointer list-none items-center gap-2 text-xs leading-none font-medium [&::-webkit-details-marker]:hidden">
+                <summary className="flex cursor-pointer list-none items-center gap-2 text-xs leading-none font-bold [&::-webkit-details-marker]:hidden">
                   <Wrench className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
                   <span
                     className="min-w-0 flex-1 truncate py-0.5"

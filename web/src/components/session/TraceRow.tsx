@@ -82,7 +82,7 @@ const TraceRow = React.memo(
               >
                 <ItemBadge type="TRACE" isSmall />
                 <div className="flex flex-col">
-                  <span className="text-xs font-medium">
+                  <span className="text-xs font-bold">
                     {trace.name} ({trace.id})&nbsp;↗
                   </span>
                   <span className="text-muted-foreground text-xs">
@@ -133,7 +133,7 @@ const TraceRow = React.memo(
               </div>
             </div>
             <div className="flex-1">
-              <p className="mb-1 font-medium">Scores</p>
+              <p className="mb-1 font-bold">Scores</p>
               <div className="flex flex-wrap content-start items-start gap-1">
                 <GroupedScoreBadges scores={trace.scores} />
               </div>
