@@ -7,6 +7,9 @@ service:
   base-path: /api/public
   endpoints:
     get:
+      availability:
+        status: deprecated
+        message: "Use GET /api/public/v2/observations instead."
       docs: Get a observation
       method: GET
       path: /observations/{observationId}
@@ -16,6 +19,9 @@ service:
           docs: The unique langfuse identifier of an observation, can be an event, span or generation
       response: commons.ObservationsView
     getMany:
+      availability:
+        status: deprecated
+        message: "Use GET /api/public/v2/observations instead."
       docs: |
         Get a list of observations.
 
@@ -160,3 +166,4 @@ types:
     properties:
       data: list<commons.ObservationsView>
       meta: pagination.MetaResponse
+      _deprecation: optional<commons.Deprecation>
