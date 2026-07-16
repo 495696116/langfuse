@@ -10,6 +10,7 @@ import {
   createDatasetRunItemForApi,
   listDatasetRunItemsForApi,
 } from "@/src/features/datasets/server/publicDatasetService";
+import { DATASET_RUN_ITEMS_DEPRECATION } from "@/src/features/public-api/server/deprecations";
 
 export default withMiddlewares({
   POST: createAuthedProjectAPIRoute({
@@ -25,6 +26,7 @@ export default withMiddlewares({
     name: "Get Dataset Run Items",
     querySchema: GetDatasetRunItemsV1Query,
     responseSchema: GetDatasetRunItemsV1Response,
+    deprecation: DATASET_RUN_ITEMS_DEPRECATION,
     rateLimitResource: "datasets",
     fn: async ({ query, auth }) => {
       return await listDatasetRunItemsForApi({
