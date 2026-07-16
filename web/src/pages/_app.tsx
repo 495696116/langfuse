@@ -80,6 +80,7 @@ import { InAppAiAgentProvider } from "@/src/ee/features/in-app-agent/components/
 import { useLangfuseCloudRegion } from "@/src/features/organizations/hooks";
 import { ScoreCacheProvider } from "@/src/features/scores/contexts/ScoreCacheContext";
 import { CorrectionCacheProvider } from "@/src/features/corrections/contexts/CorrectionCacheContext";
+import { ThemeLabMount } from "@/src/features/theme-lab/ThemeLabMount";
 import { V4_BETA_ENABLED_POSTHOG_PROPERTY } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 
 // Check that PostHog is client-side (used to handle Next.js SSR) and that env vars are set
@@ -167,6 +168,7 @@ const MyApp: AppType<{ session: Session | null }> = ({
                             <AppLayout>
                               <Component {...pageProps} />
                               <UserTracking />
+                              <ThemeLabMount />
                             </AppLayout>
                           </InAppAiAgentProvider>
                         </SupportDrawerProvider>
