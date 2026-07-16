@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { StrictMode } from "react";
 
+import type { InAppAgentPendingToolApproval } from "./InAppAiAgentProvider";
 import type { AgUiMessage } from "@/src/ee/features/in-app-agent/schema";
 import { useSmoothStreamingMessages } from "./useSmoothStreamingMessages";
 
@@ -24,25 +25,92 @@ const reasoningMessage = (content: string) =>
     content,
   }) satisfies AgUiMessage;
 
+const assistantToolMessage = (toolCallIds: string[], isLoading: boolean) =>
+  ({
+    id: "assistant-tools",
+    role: "assistant",
+    content: "",
+    isLoading,
+    toolCalls: toolCallIds.map((toolCallId) => ({
+      id: toolCallId,
+      type: "function" as const,
+      function: {
+        name: `tool-${toolCallId}`,
+        arguments: "{}",
+      },
+    })),
+  }) satisfies AgUiMessage & { isLoading: boolean };
+
+const toolResultMessage = (toolCallId: string) =>
+  ({
+    id: `result-${toolCallId}`,
+    role: "tool",
+    toolCallId,
+    content: "done",
+  }) satisfies AgUiMessage;
+
+const pendingToolApproval = (
+  id: string,
+  status: InAppAgentPendingToolApproval["status"],
+) =>
+  ({
+    id,
+    status,
+    approvalRequest: {
+      type: "tool_approval_request",
+      toolCallId: id,
+      toolName: `tool-${id}`,
+      args: {},
+      runId: "run-1",
+    },
+  }) satisfies InAppAgentPendingToolApproval;
+
 let prefersReducedMotion = false;
+
+function runAllAnimationFrames() {
+  while (vi.getTimerCount() > 0) {
+    act(() => {
+      vi.advanceTimersByTime(40);
+    });
+  }
+}
+
+function advanceAnimationFrames(frameCount: number) {
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    act(() => {
+      vi.advanceTimersByTime(40);
+    });
+  }
+}
 
 function TestConsumer({
   liveMessageVersion,
   messages,
+  pendingToolApprovals = [],
 }: {
   liveMessageVersion: number;
   messages: AgUiMessage[];
+  pendingToolApprovals?: InAppAgentPendingToolApproval[];
 }) {
-  const smoothStreaming = useSmoothStreamingMessages(
+  const smoothStreaming = useSmoothStreamingMessages({
     messages,
     liveMessageVersion,
-    false,
-  );
+    pendingToolApprovals,
+    shouldFlush: false,
+  });
   const latestMessage = smoothStreaming.messages.at(-1);
   const isLoading =
     latestMessage &&
     "isLoading" in latestMessage &&
     latestMessage.isLoading === true;
+  const toolCallIds = smoothStreaming.messages.flatMap((message) =>
+    message.role === "assistant"
+      ? (message.toolCalls?.map((toolCall) => toolCall.id) ?? [])
+      : [],
+  );
+  const toolResultIds = smoothStreaming.messages.flatMap((message) =>
+    message.role === "tool" ? [message.toolCallId] : [],
+  );
 
   return (
     <>
@@ -58,6 +126,25 @@ function TestConsumer({
       <span data-testid="message-ids">
         {smoothStreaming.messages.map((message) => message.id).join(",")}
       </span>
+      {smoothStreaming.messages.map((message) =>
+        typeof message.content === "string" ? (
+          <span key={message.id} data-testid={`content-${message.id}`}>
+            {message.content}
+          </span>
+        ) : null,
+      )}
+      <span data-testid="approval-ids">
+        {smoothStreaming.pendingToolApprovals
+          .map((approval) => approval.id)
+          .join(",")}
+      </span>
+      <span data-testid="approval-statuses">
+        {smoothStreaming.pendingToolApprovals
+          .map((approval) => approval.status)
+          .join(",")}
+      </span>
+      <span data-testid="tool-call-ids">{toolCallIds.join(",")}</span>
+      <span data-testid="tool-result-ids">{toolResultIds.join(",")}</span>
     </>
   );
 }
@@ -65,7 +152,6 @@ function TestConsumer({
 describe("useSmoothStreamingMessages", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(0);
     prefersReducedMotion = false;
     vi.stubGlobal(
       "matchMedia",
@@ -119,8 +205,13 @@ describe("useSmoothStreamingMessages", () => {
     expect(screen.getByTestId("loading")).toHaveTextContent("true");
 
     act(() => {
-      vi.runAllTimers();
+      vi.advanceTimersByTime(300);
     });
+
+    expect(screen.getByTestId("content")).not.toHaveTextContent(content);
+    expect(screen.getByTestId("animating")).toHaveTextContent("true");
+
+    runAllAnimationFrames();
 
     expect(screen.getByTestId("content")).toHaveTextContent(content);
     expect(screen.getByTestId("animating")).toHaveTextContent("false");
@@ -175,12 +266,83 @@ describe("useSmoothStreamingMessages", () => {
     expect(screen.getByTestId("content")).not.toHaveTextContent(content);
     expect(screen.getByTestId("animating")).toHaveTextContent("true");
 
-    act(() => {
-      vi.runAllTimers();
-    });
+    runAllAnimationFrames();
 
     expect(screen.getByTestId("content")).toHaveTextContent(content);
     expect(screen.getByTestId("animating")).toHaveTextContent("false");
+  });
+
+  it("matches the observed generation rate for the next text chunk", () => {
+    const { rerender } = render(
+      <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
+    );
+    const emptyAssistantMessage = assistantMessage("");
+
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[userMessage, emptyAssistantMessage]}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    const generatedContent = "x".repeat(200);
+    rerender(
+      <TestConsumer
+        liveMessageVersion={2}
+        messages={[userMessage, assistantMessage(generatedContent)]}
+      />,
+    );
+    advanceAnimationFrames(25);
+
+    const displayedLength =
+      screen.getByTestId("content-assistant").textContent?.length ?? 0;
+    expect(displayedLength).toBeGreaterThanOrEqual(95);
+    expect(displayedLength).toBeLessThanOrEqual(105);
+    runAllAnimationFrames();
+  });
+
+  it("reveals reasoning and assistant text before later tools", () => {
+    const reasoningContent = "r".repeat(40);
+    const assistantContent = "a".repeat(40);
+    const toolMessage = {
+      id: "tool-result",
+      role: "tool",
+      toolCallId: "tool-call",
+      content: "done",
+    } satisfies AgUiMessage;
+    const { rerender } = render(
+      <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
+    );
+
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[
+          userMessage,
+          reasoningMessage(reasoningContent),
+          {
+            id: "assistant-2",
+            role: "assistant",
+            content: assistantContent,
+          },
+          toolMessage,
+        ]}
+      />,
+    );
+    advanceAnimationFrames(30);
+
+    expect(screen.getByTestId("content-reasoning")).toHaveTextContent(
+      reasoningContent,
+    );
+    expect(screen.getByTestId("content-assistant-2")).not.toHaveTextContent(
+      assistantContent,
+    );
+    expect(screen.getByTestId("message-ids")).not.toHaveTextContent(
+      "tool-result",
+    );
   });
 
   it("smooths reasoning without splitting graphemes", () => {
@@ -225,9 +387,7 @@ describe("useSmoothStreamingMessages", () => {
       reasoning.content,
     );
 
-    act(() => {
-      vi.runAllTimers();
-    });
+    runAllAnimationFrames();
     expect(screen.getByTestId("content")).toHaveTextContent(reasoning.content);
   });
 
@@ -278,11 +438,128 @@ describe("useSmoothStreamingMessages", () => {
       "tool-result",
     );
 
-    act(() => {
-      vi.runAllTimers();
-    });
+    runAllAnimationFrames();
     expect(screen.getByTestId("message-ids")).toHaveTextContent(
       "user,assistant,tool-result",
+    );
+  });
+
+  it("reveals at most two tools per second", () => {
+    const { rerender } = render(
+      <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
+    );
+
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[
+          userMessage,
+          assistantToolMessage(["tool-1", "tool-2", "tool-3"], true),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-call-ids")).toHaveTextContent("tool-1");
+    expect(screen.getByTestId("tool-call-ids")).not.toHaveTextContent("tool-2");
+
+    act(() => {
+      vi.advanceTimersByTime(499);
+    });
+    expect(screen.getByTestId("tool-call-ids")).not.toHaveTextContent("tool-2");
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByTestId("tool-call-ids")).toHaveTextContent(
+      "tool-1,tool-2",
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByTestId("tool-call-ids")).toHaveTextContent(
+      "tool-1,tool-2,tool-3",
+    );
+  });
+
+  it("keeps a completed tool running for at least 750 ms", () => {
+    const { rerender } = render(
+      <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
+    );
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[userMessage, assistantToolMessage(["tool-1"], true)]}
+      />,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    rerender(
+      <TestConsumer
+        liveMessageVersion={2}
+        messages={[
+          userMessage,
+          assistantToolMessage(["tool-1"], false),
+          toolResultMessage("tool-1"),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-result-ids")).toBeEmptyDOMElement();
+    expect(screen.getByTestId("animating")).toHaveTextContent("true");
+
+    act(() => {
+      vi.advanceTimersByTime(649);
+    });
+    expect(screen.getByTestId("tool-result-ids")).toBeEmptyDOMElement();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByTestId("tool-result-ids")).toHaveTextContent("tool-1");
+  });
+
+  it("paces approval appearance but applies submitting immediately", () => {
+    const { rerender } = render(
+      <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
+    );
+    const firstApproval = pendingToolApproval("approval-1", "pending");
+    const secondApproval = pendingToolApproval("approval-2", "pending");
+
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[userMessage]}
+        pendingToolApprovals={[firstApproval, secondApproval]}
+      />,
+    );
+
+    expect(screen.getByTestId("approval-ids")).toHaveTextContent("approval-1");
+    expect(screen.getByTestId("approval-ids")).not.toHaveTextContent(
+      "approval-2",
+    );
+
+    rerender(
+      <TestConsumer
+        liveMessageVersion={1}
+        messages={[userMessage]}
+        pendingToolApprovals={[
+          pendingToolApproval("approval-1", "submitting"),
+          secondApproval,
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("approval-statuses")).toHaveTextContent(
+      "submitting",
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByTestId("approval-ids")).toHaveTextContent(
+      "approval-1,approval-2",
     );
   });
 
@@ -308,7 +585,7 @@ describe("useSmoothStreamingMessages", () => {
 
   it("flushes active animation when animation becomes disabled", () => {
     const content =
-      "This active animation should finish as soon as its browser tab becomes hidden.";
+      "This active animation should finish when reduced motion becomes enabled.";
     const { rerender } = render(
       <TestConsumer liveMessageVersion={0} messages={[userMessage]} />,
     );

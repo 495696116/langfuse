@@ -34,23 +34,6 @@ type ControlledInAppAgentWindowProps = ControlledInAppAgentWindowBaseProps &
 export function ControlledInAppAgentWindow(
   props: ControlledInAppAgentWindowProps,
 ) {
-  const agent = useInAppAiAgent();
-
-  return (
-    <ControlledInAppAgentWindowInner
-      key={agent.selectedConversationId ?? "new-conversation"}
-      agent={agent}
-      {...props}
-    />
-  );
-}
-
-function ControlledInAppAgentWindowInner({
-  agent,
-  ...props
-}: ControlledInAppAgentWindowProps & {
-  agent: ReturnType<typeof useInAppAiAgent>;
-}) {
   const router = useRouter();
   const {
     conversations,
@@ -72,9 +55,18 @@ function ControlledInAppAgentWindowInner({
     selectedConversationIsWriteLocked,
     submit,
     submitFeedback,
-  } = agent;
-  const { isAnimating, messages: displayedMessages } =
-    useSmoothStreamingMessages(messages, liveMessageVersion, error !== null);
+  } = useInAppAiAgent();
+  const {
+    isAnimating,
+    messages: displayedMessages,
+    pendingToolApprovals: displayedPendingToolApprovals,
+    runningToolCallIds,
+  } = useSmoothStreamingMessages({
+    messages,
+    liveMessageVersion,
+    pendingToolApprovals,
+    shouldFlush: error !== null,
+  });
   const isInputDisabled =
     isRunning ||
     isAnimating ||
@@ -99,9 +91,17 @@ function ControlledInAppAgentWindowInner({
         error,
         isRunning: isRunning || isAnimating,
         messages: displayedMessages,
-        pendingToolApprovals,
+        pendingToolApprovals: displayedPendingToolApprovals,
+        runningToolCallIds,
       }),
-    [displayedMessages, error, isAnimating, isRunning, pendingToolApprovals],
+    [
+      displayedMessages,
+      displayedPendingToolApprovals,
+      error,
+      isAnimating,
+      isRunning,
+      runningToolCallIds,
+    ],
   );
 
   const closeButtonProps =

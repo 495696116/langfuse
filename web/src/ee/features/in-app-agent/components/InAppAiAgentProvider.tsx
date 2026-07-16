@@ -231,6 +231,9 @@ function InAppAiAgentProviderInner({
       {},
     );
   const [messages, setMessages] = useState<AgUiMessage[]>([]);
+  // Only live AG-UI publications increment this version. The display smoother
+  // uses it to distinguish stream updates from history hydration, including
+  // updates where the agent mutates message objects in place.
   const [liveMessageVersion, setLiveMessageVersion] = useState(0);
   const [pendingToolApprovals, setPendingToolApprovals] = useState<
     InAppAgentPendingToolApproval[]

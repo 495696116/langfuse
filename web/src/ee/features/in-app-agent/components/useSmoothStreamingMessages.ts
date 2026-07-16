@@ -1,65 +1,165 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useReducer } from "react";
 
+import type { InAppAgentPendingToolApproval } from "./InAppAiAgentProvider";
+import { IN_APP_AGENT_REDIRECT_TOOL_NAME } from "@/src/ee/features/in-app-agent/constants";
 import type { AgUiMessage } from "@/src/ee/features/in-app-agent/schema";
+import { assertUnreachable } from "@/src/utils/types";
 
 const FRAME_DURATION_MS = 40;
-const INITIAL_CHUNK_INTERVAL_MS = 300;
-const MIN_CHUNK_INTERVAL_MS = 80;
-const MAX_CHUNK_INTERVAL_MS = 1_000;
+const DEFAULT_GRAPHEMES_PER_SECOND = 40;
+const MIN_GRAPHEMES_PER_SECOND = 20;
+const MAX_GRAPHEMES_PER_SECOND = 400;
+const PACING_EMA_WEIGHT = 0.35;
 const MIN_SMOOTHED_GRAPHEMES = 16;
-const CHUNK_INTERVAL_WEIGHT = 0.3;
+const TOOL_TRANSITION_INTERVAL_MS = 500;
+const MIN_TOOL_RUNNING_DURATION_MS = 750;
 
-const graphemeSegmenter =
-  typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
+type ToolDisplayState = Record<
+  string,
+  {
+    visibleAtMs: number;
+    terminalVisible: boolean;
+    order: number;
+  }
+>;
 
-export function useSmoothStreamingMessages(
-  messages: AgUiMessage[],
-  liveMessageVersion: number,
-  shouldFlush: boolean,
-) {
-  const [displayedMessages, setDisplayedMessages] = useState(messages);
-  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
-  const controllerRef = useRef<ReturnType<
-    typeof createSmoothStreamingController
-  > | null>(null);
-  const lastLiveMessageVersionRef = useRef(liveMessageVersion);
-  const shouldFlushRef = useRef(shouldFlush);
-  shouldFlushRef.current = shouldFlush;
+type SmoothStreamingState = {
+  displayedMessages: AgUiMessage[];
+  targetMessages: AgUiMessage[];
+  liveMessageVersion: number;
+  textPacingByMessageId: Record<
+    string,
+    {
+      lastPublishedAtMs: number;
+      graphemesPerSecond: number | null;
+    }
+  >;
+  targetToolApprovals: InAppAgentPendingToolApproval[];
+  displayedToolApprovals: InAppAgentPendingToolApproval[];
+  toolDisplayById: ToolDisplayState;
+  lastToolTransitionAtMs: number | null;
+  nowMs: number;
+  animation: {
+    messageId: string;
+    graphemeBudget: number;
+  } | null;
+};
+
+/**
+ * Keeps canonical AG-UI messages untouched while exposing a paced display copy.
+ * `liveMessageVersion` changes only for live stream publications, so hydrated
+ * history appears immediately. The reducer owns display progress; effects only
+ * integrate it with the browser timer and visibility lifecycle.
+ */
+export function useSmoothStreamingMessages({
+  messages,
+  liveMessageVersion,
+  pendingToolApprovals,
+  shouldFlush,
+}: {
+  messages: AgUiMessage[];
+  liveMessageVersion: number;
+  pendingToolApprovals: InAppAgentPendingToolApproval[];
+  shouldFlush: boolean;
+}) {
+  const [state, dispatch] = useReducer(
+    smoothStreamingReducer,
+    { messages, liveMessageVersion },
+    ({ messages: initialMessages, liveMessageVersion: initialVersion }) => {
+      const initialSnapshot = snapshotMessages(initialMessages);
+      const initialToolDisplay = createImmediateToolDisplay(
+        initialSnapshot,
+        pendingToolApprovals,
+      );
+
+      return {
+        displayedMessages: initialSnapshot,
+        targetMessages: initialSnapshot,
+        liveMessageVersion: initialVersion,
+        textPacingByMessageId: {},
+        targetToolApprovals: pendingToolApprovals,
+        displayedToolApprovals: pendingToolApprovals,
+        toolDisplayById: initialToolDisplay,
+        lastToolTransitionAtMs: null,
+        nowMs: performance.now(),
+        animation: null,
+      } satisfies SmoothStreamingState;
+    },
+  );
+
+  const canAnimate = useEffectEvent(
+    () =>
+      !shouldFlush &&
+      document.visibilityState === "visible" &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
 
   useEffect(() => {
-    const controller =
-      controllerRef.current ??
-      createSmoothStreamingController({
-        initialMessages: messages,
-        onActiveMessageChanged: setActiveMessageId,
-        onMessagesChanged: setDisplayedMessages,
-        shouldAnimate: () =>
-          !shouldFlushRef.current &&
-          document.visibilityState === "visible" &&
-          !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    dispatch({
+      type: "enqueue",
+      messages,
+      liveMessageVersion,
+      pendingToolApprovals,
+      canAnimate: canAnimate(),
+      publishedAtMs: performance.now(),
+    });
+  }, [liveMessageVersion, messages, pendingToolApprovals]);
+
+  const animation = state.animation;
+  const nextToolTransitionAtMs = getNextToolTransitionAtMs(state);
+  useEffect(() => {
+    if (animation === null && nextToolTransitionAtMs === null) {
+      return;
+    }
+
+    const delayMs = animation
+      ? FRAME_DURATION_MS
+      : Math.max(0, nextToolTransitionAtMs! - performance.now());
+    const timeoutId = window.setTimeout(() => {
+      dispatch({
+        type: canAnimate() ? "tick" : "finish",
+        nowMs: performance.now(),
       });
-    controllerRef.current = controller;
-    const shouldStartAnimation =
-      liveMessageVersion !== lastLiveMessageVersionRef.current;
-    lastLiveMessageVersionRef.current = liveMessageVersion;
-    controller.enqueue(messages, shouldStartAnimation);
-  }, [liveMessageVersion, messages]);
+    }, delayMs);
 
-  useEffect(() => {
     return () => {
-      controllerRef.current?.cancel();
-      controllerRef.current = null;
+      window.clearTimeout(timeoutId);
     };
-  }, []);
+  }, [animation, nextToolTransitionAtMs]);
+
+  const isAnimating = animation !== null || nextToolTransitionAtMs !== null;
+  useEffect(() => {
+    if (!isAnimating) {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (!canAnimate()) {
+        dispatch({ type: "finish" });
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isAnimating]);
+
+  const activeMessageId = animation?.messageId ?? null;
+  const projectedMessages = projectToolMessages(
+    state.displayedMessages,
+    state.toolDisplayById,
+  );
+  const runningToolCallIds = getRunningToolCallIds(state.toolDisplayById);
 
   return {
-    isAnimating: activeMessageId !== null,
+    isAnimating,
+    pendingToolApprovals: state.displayedToolApprovals,
+    runningToolCallIds,
     messages:
       activeMessageId === null
-        ? displayedMessages
-        : displayedMessages.map((message) =>
+        ? projectedMessages
+        : projectedMessages.map((message) =>
             message.id === activeMessageId
               ? { ...message, isLoading: true }
               : message,
@@ -67,189 +167,487 @@ export function useSmoothStreamingMessages(
   };
 }
 
-function createSmoothStreamingController({
-  initialMessages,
-  onActiveMessageChanged,
-  onMessagesChanged,
-  shouldAnimate,
-}: {
-  initialMessages: AgUiMessage[];
-  onActiveMessageChanged: (messageId: string | null) => void;
-  onMessagesChanged: (messages: AgUiMessage[]) => void;
-  shouldAnimate: () => boolean;
-}) {
-  let displayedMessages = snapshotMessages(initialMessages);
-  let targetMessages = displayedMessages;
-  let timeoutId: number | null = null;
-  let isCancelled = false;
-  let expectedChunkIntervalMs = INITIAL_CHUNK_INTERVAL_MS;
-  let animationDeadline = 0;
-  let lastContentAt: number | null = null;
-  let lastContentMessageId: string | null = null;
-  let activeMessageId: string | null = null;
-
-  const setActiveMessageId = (messageId: string | null) => {
-    if (activeMessageId === messageId) {
-      return;
-    }
-
-    activeMessageId = messageId;
-    onActiveMessageChanged(messageId);
-  };
-
-  const clearScheduledFrame = () => {
-    if (timeoutId === null) {
-      return;
-    }
-
-    window.clearTimeout(timeoutId);
-    timeoutId = null;
-  };
-
-  const stopListeningForVisibilityChanges = () => {
-    document.removeEventListener("visibilitychange", handleVisibilityChange);
-  };
-
-  const publish = (messages: AgUiMessage[]) => {
-    displayedMessages = messages;
-    onMessagesChanged(messages);
-  };
-
-  const finish = () => {
-    clearScheduledFrame();
-    stopListeningForVisibilityChanges();
-    if (displayedMessages !== targetMessages) {
-      publish(targetMessages);
-    }
-    setActiveMessageId(null);
-  };
-
-  const emitFrame = () => {
-    timeoutId = null;
-    if (isCancelled) {
-      return;
-    }
-
-    if (!shouldAnimate()) {
-      finish();
-      return;
-    }
-
-    const pendingText = findPendingText(displayedMessages, targetMessages);
-    if (!pendingText) {
-      finish();
-      return;
-    }
-
-    setActiveMessageId(pendingText.targetMessage.id);
-
-    const remainingGraphemes = splitGraphemes(
-      pendingText.targetText.slice(pendingText.displayedText.length),
+function smoothStreamingReducer(
+  state: SmoothStreamingState,
+  action:
+    | {
+        type: "enqueue";
+        messages: AgUiMessage[];
+        liveMessageVersion: number;
+        pendingToolApprovals: InAppAgentPendingToolApproval[];
+        canAnimate: boolean;
+        publishedAtMs: number;
+      }
+    | { type: "tick"; nowMs: number }
+    | { type: "finish" },
+) {
+  if (action.type === "enqueue") {
+    const nextMessages = snapshotMessages(action.messages);
+    const isLivePublication =
+      action.liveMessageVersion !== state.liveMessageVersion;
+    const publishedTexts = isLivePublication
+      ? findPublishedTexts(state.targetMessages, nextMessages)
+      : [];
+    const appendedText = publishedTexts.find(
+      (
+        publishedText,
+      ): publishedText is { messageId: string; appendedText: string } =>
+        typeof publishedText.appendedText === "string" &&
+        publishedText.appendedText.length > 0,
     );
-    const remainingDurationMs = Math.max(
-      FRAME_DURATION_MS,
-      animationDeadline - Date.now(),
-    );
-    const graphemesThisFrame = Math.max(
-      1,
-      Math.ceil(
-        remainingGraphemes.length * (FRAME_DURATION_MS / remainingDurationMs),
+    const nextState = {
+      ...state,
+      targetMessages: nextMessages,
+      liveMessageVersion: action.liveMessageVersion,
+      targetToolApprovals: action.pendingToolApprovals,
+      displayedToolApprovals: mergeDisplayedToolApprovals(
+        state.displayedToolApprovals,
+        action.pendingToolApprovals,
       ),
-    );
-    const nextText =
-      pendingText.displayedText +
-      remainingGraphemes.slice(0, graphemesThisFrame).join("");
+      nowMs: action.publishedAtMs,
+      textPacingByMessageId: isLivePublication
+        ? updateTextPacing(
+            state.textPacingByMessageId,
+            publishedTexts,
+            nextMessages,
+            action.publishedAtMs,
+          )
+        : state.textPacingByMessageId,
+    };
+    let nextTextState: SmoothStreamingState;
 
-    if (nextText === pendingText.targetText) {
-      finish();
-      return;
+    if (!appendedText) {
+      if (state.animation !== null) {
+        nextTextState = nextState;
+      } else {
+        nextTextState = finishTextStreaming(nextState);
+      }
+    } else if (!action.canAnimate) {
+      nextTextState = finishTextStreaming(nextState);
+    } else if (state.animation !== null) {
+      nextTextState = nextState;
+    } else if (
+      splitGraphemes(appendedText.appendedText).length < MIN_SMOOTHED_GRAPHEMES
+    ) {
+      nextTextState = finishTextStreaming(nextState);
+    } else {
+      nextTextState = advanceStreamingFrame({
+        ...nextState,
+        animation: {
+          messageId: appendedText.messageId,
+          graphemeBudget: 0,
+        },
+      });
     }
 
-    publish(
-      targetMessages
-        .slice(0, pendingText.targetIndex)
-        .concat(withTextContent(pendingText.targetMessage, nextText)),
+    const approvalsChanged = !areToolApprovalsEqual(
+      state.targetToolApprovals,
+      action.pendingToolApprovals,
     );
-    timeoutId = window.setTimeout(emitFrame, FRAME_DURATION_MS);
-  };
+    if (!action.canAnimate || (!isLivePublication && !approvalsChanged)) {
+      return flushStreaming(nextTextState, action.publishedAtMs);
+    }
 
-  function handleVisibilityChange() {
-    if (!shouldAnimate()) {
-      finish();
+    return nextTextState.animation === null
+      ? applyNextToolTransition(nextTextState, action.publishedAtMs)
+      : nextTextState;
+  }
+
+  if (action.type === "tick") {
+    const nextState = {
+      ...state,
+      nowMs: action.nowMs,
+    };
+    const nextTextState = nextState.animation
+      ? advanceStreamingFrame(nextState)
+      : nextState;
+
+    return nextTextState.animation === null
+      ? applyNextToolTransition(nextTextState, action.nowMs)
+      : nextTextState;
+  }
+
+  if (action.type === "finish") {
+    return flushStreaming(state, state.nowMs);
+  }
+
+  return assertUnreachable(action);
+}
+
+function advanceStreamingFrame(state: SmoothStreamingState) {
+  if (state.animation === null) {
+    return state;
+  }
+
+  const pendingText = findPendingText(
+    state.displayedMessages,
+    state.targetMessages,
+  );
+  if (!pendingText) {
+    return finishTextStreaming(state);
+  }
+
+  const remainingGraphemes = splitGraphemes(
+    pendingText.targetText.slice(pendingText.displayedText.length),
+  );
+  const graphemeBudget =
+    state.animation.graphemeBudget +
+    (state.textPacingByMessageId[pendingText.targetMessage.id]
+      ?.graphemesPerSecond ?? DEFAULT_GRAPHEMES_PER_SECOND) *
+      (FRAME_DURATION_MS / 1_000);
+  const graphemesThisFrame = Math.floor(graphemeBudget);
+  const nextText =
+    pendingText.displayedText +
+    remainingGraphemes.slice(0, graphemesThisFrame).join("");
+
+  if (nextText === pendingText.targetText) {
+    const displayedMessages = state.targetMessages.slice(
+      0,
+      pendingText.targetIndex + 1,
+    );
+    const nextPendingText = findPendingText(
+      displayedMessages,
+      state.targetMessages,
+    );
+
+    if (!nextPendingText) {
+      return finishTextStreaming(state);
+    }
+
+    return advanceStreamingFrame({
+      ...state,
+      displayedMessages,
+      animation: {
+        messageId: nextPendingText.targetMessage.id,
+        graphemeBudget: 0,
+      },
+    });
+  }
+
+  return {
+    ...state,
+    displayedMessages: state.targetMessages
+      .slice(0, pendingText.targetIndex)
+      .concat(withTextContent(pendingText.targetMessage, nextText)),
+    animation: {
+      messageId: pendingText.targetMessage.id,
+      graphemeBudget: graphemeBudget - graphemesThisFrame,
+    },
+  };
+}
+
+function finishTextStreaming(state: SmoothStreamingState) {
+  return {
+    ...state,
+    displayedMessages: state.targetMessages,
+    animation: null,
+  };
+}
+
+function flushStreaming(state: SmoothStreamingState, nowMs: number) {
+  const finishedTextState = finishTextStreaming(state);
+
+  return {
+    ...finishedTextState,
+    displayedToolApprovals: state.targetToolApprovals,
+    toolDisplayById: createImmediateToolDisplay(
+      state.targetMessages,
+      state.targetToolApprovals,
+      nowMs,
+    ),
+    lastToolTransitionAtMs: null,
+    nowMs,
+  };
+}
+
+function getTargetTools(
+  messages: AgUiMessage[],
+  pendingToolApprovals: InAppAgentPendingToolApproval[],
+) {
+  const resultToolCallIds = new Set(
+    messages.flatMap((message) =>
+      message.role === "tool" ? [message.toolCallId] : [],
+    ),
+  );
+  const approvalIds = new Set(
+    pendingToolApprovals.map((approval) => approval.id),
+  );
+  const tools: Array<{
+    id: string;
+    isTerminal: boolean;
+    order: number;
+  }> = [];
+  const seenToolCallIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+
+    for (const toolCall of message.toolCalls ?? []) {
+      if (toolCall.function.name === IN_APP_AGENT_REDIRECT_TOOL_NAME) {
+        continue;
+      }
+
+      seenToolCallIds.add(toolCall.id);
+      tools.push({
+        id: toolCall.id,
+        isTerminal:
+          resultToolCallIds.has(toolCall.id) ||
+          (!isMessageLoading(message) && !approvalIds.has(toolCall.id)),
+        order: tools.length,
+      });
     }
   }
 
-  const startListeningForVisibilityChanges = () => {
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-  };
-
-  const enqueue = (messages: AgUiMessage[], shouldStartAnimation: boolean) => {
-    if (isCancelled) {
-      return;
+  for (const approval of pendingToolApprovals) {
+    if (seenToolCallIds.has(approval.id)) {
+      continue;
     }
 
-    const nextMessages = snapshotMessages(messages);
-    const appendedText = findAppendedText(targetMessages, nextMessages);
-    targetMessages = nextMessages;
+    tools.push({
+      id: approval.id,
+      isTerminal: false,
+      order: tools.length,
+    });
+  }
 
-    if (!appendedText) {
-      if (timeoutId === null) {
-        finish();
+  return tools;
+}
+
+function createImmediateToolDisplay(
+  messages: AgUiMessage[],
+  pendingToolApprovals: InAppAgentPendingToolApproval[],
+  visibleAtMs = 0,
+) {
+  const toolDisplayById: ToolDisplayState = {};
+
+  for (const tool of getTargetTools(messages, pendingToolApprovals)) {
+    toolDisplayById[tool.id] = {
+      visibleAtMs,
+      terminalVisible: tool.isTerminal,
+      order: tool.order,
+    };
+  }
+
+  return toolDisplayById;
+}
+
+function getToolTransitionCandidates(state: SmoothStreamingState) {
+  const targetTools = getTargetTools(
+    state.targetMessages,
+    state.targetToolApprovals,
+  );
+  const targetToolsById = new Map(targetTools.map((tool) => [tool.id, tool]));
+  const nextGlobalTransitionAtMs =
+    state.lastToolTransitionAtMs === null
+      ? state.nowMs
+      : state.lastToolTransitionAtMs + TOOL_TRANSITION_INTERVAL_MS;
+  const candidates: Array<{
+    id: string;
+    type: "appearance" | "terminal";
+    dueAtMs: number;
+    order: number;
+  }> = [];
+
+  for (const tool of targetTools) {
+    if (!state.toolDisplayById[tool.id]) {
+      candidates.push({
+        id: tool.id,
+        type: "appearance",
+        dueAtMs: nextGlobalTransitionAtMs,
+        order: tool.order,
+      });
+    }
+  }
+
+  for (const [toolCallId, display] of Object.entries(state.toolDisplayById)) {
+    const targetTool = targetToolsById.get(toolCallId);
+    if (!display.terminalVisible && (!targetTool || targetTool.isTerminal)) {
+      candidates.push({
+        id: toolCallId,
+        type: "terminal",
+        dueAtMs: Math.max(
+          nextGlobalTransitionAtMs,
+          display.visibleAtMs + MIN_TOOL_RUNNING_DURATION_MS,
+        ),
+        order: display.order,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function getNextToolTransitionAtMs(state: SmoothStreamingState) {
+  const candidates = getToolTransitionCandidates(state);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return Math.min(...candidates.map((candidate) => candidate.dueAtMs));
+}
+
+function applyNextToolTransition(state: SmoothStreamingState, nowMs: number) {
+  const candidate = getToolTransitionCandidates(state)
+    .filter((transition) => transition.dueAtMs <= nowMs)
+    .sort((left, right) => left.order - right.order)[0];
+
+  if (!candidate) {
+    return state;
+  }
+
+  if (candidate.type === "appearance") {
+    const targetTool = getTargetTools(
+      state.targetMessages,
+      state.targetToolApprovals,
+    ).find((tool) => tool.id === candidate.id);
+    if (!targetTool) {
+      return state;
+    }
+
+    const approval = state.targetToolApprovals.find(
+      (currentApproval) => currentApproval.id === candidate.id,
+    );
+    return {
+      ...state,
+      displayedToolApprovals:
+        approval &&
+        !state.displayedToolApprovals.some(
+          (displayedApproval) => displayedApproval.id === approval.id,
+        )
+          ? state.displayedToolApprovals.concat(approval)
+          : state.displayedToolApprovals,
+      toolDisplayById: {
+        ...state.toolDisplayById,
+        [candidate.id]: {
+          visibleAtMs: nowMs,
+          terminalVisible: false,
+          order: targetTool.order,
+        },
+      },
+      lastToolTransitionAtMs: nowMs,
+      nowMs,
+    };
+  }
+
+  const display = state.toolDisplayById[candidate.id];
+  if (!display) {
+    return state;
+  }
+
+  return {
+    ...state,
+    displayedToolApprovals: state.displayedToolApprovals.filter(
+      (approval) => approval.id !== candidate.id,
+    ),
+    toolDisplayById: {
+      ...state.toolDisplayById,
+      [candidate.id]: {
+        ...display,
+        terminalVisible: true,
+      },
+    },
+    lastToolTransitionAtMs: nowMs,
+    nowMs,
+  };
+}
+
+function mergeDisplayedToolApprovals(
+  displayedApprovals: InAppAgentPendingToolApproval[],
+  targetApprovals: InAppAgentPendingToolApproval[],
+) {
+  const targetApprovalsById = new Map(
+    targetApprovals.map((approval) => [approval.id, approval]),
+  );
+
+  return displayedApprovals.map(
+    (approval) => targetApprovalsById.get(approval.id) ?? approval,
+  );
+}
+
+function areToolApprovalsEqual(
+  currentApprovals: InAppAgentPendingToolApproval[],
+  nextApprovals: InAppAgentPendingToolApproval[],
+) {
+  return (
+    currentApprovals.length === nextApprovals.length &&
+    currentApprovals.every(
+      (approval, index) =>
+        approval.id === nextApprovals[index]?.id &&
+        approval.status === nextApprovals[index]?.status,
+    )
+  );
+}
+
+function projectToolMessages(
+  messages: AgUiMessage[],
+  toolDisplayById: ToolDisplayState,
+) {
+  const knownToolCallIds = new Set(Object.keys(toolDisplayById));
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+
+    for (const toolCall of message.toolCalls ?? []) {
+      if (toolCall.function.name !== IN_APP_AGENT_REDIRECT_TOOL_NAME) {
+        knownToolCallIds.add(toolCall.id);
       }
-      return;
+    }
+  }
+
+  return messages.flatMap((message) => {
+    if (message.role === "tool") {
+      if (!knownToolCallIds.has(message.toolCallId)) {
+        return [message];
+      }
+
+      return toolDisplayById[message.toolCallId]?.terminalVisible
+        ? [message]
+        : [];
     }
 
-    const now = Date.now();
-    if (
-      lastContentAt !== null &&
-      lastContentMessageId === appendedText.messageId
-    ) {
-      const observedIntervalMs = Math.min(
-        MAX_CHUNK_INTERVAL_MS,
-        Math.max(MIN_CHUNK_INTERVAL_MS, now - lastContentAt),
-      );
-      expectedChunkIntervalMs =
-        expectedChunkIntervalMs * (1 - CHUNK_INTERVAL_WEIGHT) +
-        observedIntervalMs * CHUNK_INTERVAL_WEIGHT;
-    } else {
-      expectedChunkIntervalMs = INITIAL_CHUNK_INTERVAL_MS;
+    if (message.role !== "assistant" || !message.toolCalls) {
+      return [message];
     }
 
-    lastContentAt = now;
-    lastContentMessageId = appendedText.messageId;
-    animationDeadline = now + expectedChunkIntervalMs;
+    const toolCalls = message.toolCalls.filter(
+      (toolCall) =>
+        toolCall.function.name === IN_APP_AGENT_REDIRECT_TOOL_NAME ||
+        Boolean(toolDisplayById[toolCall.id]),
+    );
+    const hasPendingTool = message.toolCalls.some((toolCall) => {
+      if (toolCall.function.name === IN_APP_AGENT_REDIRECT_TOOL_NAME) {
+        return false;
+      }
 
-    if (
-      !shouldAnimate() ||
-      (timeoutId === null &&
-        (!shouldStartAnimation ||
-          splitGraphemes(appendedText.delta).length < MIN_SMOOTHED_GRAPHEMES))
-    ) {
-      finish();
-      return;
-    }
+      return !toolDisplayById[toolCall.id]?.terminalVisible;
+    });
 
-    if (timeoutId === null) {
-      startListeningForVisibilityChanges();
-      emitFrame();
-    }
-  };
+    return [
+      {
+        ...message,
+        toolCalls,
+        ...(hasPendingTool ? { isLoading: true } : {}),
+      },
+    ];
+  });
+}
 
-  const cancel = () => {
-    if (isCancelled) {
-      return;
-    }
+function getRunningToolCallIds(toolDisplayById: ToolDisplayState) {
+  return Object.entries(toolDisplayById).flatMap(([toolCallId, display]) =>
+    display.terminalVisible ? [] : [toolCallId],
+  );
+}
 
-    isCancelled = true;
-    clearScheduledFrame();
-    stopListeningForVisibilityChanges();
-    setActiveMessageId(null);
-  };
-
-  return { enqueue, cancel };
+function isMessageLoading(message: AgUiMessage) {
+  return "isLoading" in message && message.isLoading === true;
 }
 
 function snapshotMessages(messages: AgUiMessage[]) {
+  // AG-UI may mutate message objects in place; snapshots keep reducer history
+  // stable so appended text remains detectable on the next publication.
   return messages.map((message) => {
     if (message.role !== "assistant" || !message.toolCalls) {
       return { ...message };
@@ -277,13 +675,17 @@ function getSmoothableText(message: AgUiMessage | undefined) {
   return null;
 }
 
-function findAppendedText(
+function findPublishedTexts(
   previousMessages: AgUiMessage[],
   nextMessages: AgUiMessage[],
 ) {
   const previousTextByMessageId = new Map(
     previousMessages.map((message) => [message.id, getSmoothableText(message)]),
   );
+  const publishedTexts: Array<{
+    messageId: string;
+    appendedText: string | null;
+  }> = [];
 
   for (const nextMessage of nextMessages) {
     const nextText = getSmoothableText(nextMessage);
@@ -291,20 +693,72 @@ function findAppendedText(
       continue;
     }
 
-    const previousText = previousTextByMessageId.get(nextMessage.id);
-    const existingText = previousText ?? "";
-    if (
-      nextText.startsWith(existingText) &&
-      nextText.length > existingText.length
-    ) {
-      return {
+    const hasPreviousText = previousTextByMessageId.has(nextMessage.id);
+    const previousText = previousTextByMessageId.get(nextMessage.id) ?? "";
+    if (!hasPreviousText || nextText !== previousText) {
+      publishedTexts.push({
         messageId: nextMessage.id,
-        delta: nextText.slice(existingText.length),
-      };
+        appendedText: nextText.startsWith(previousText)
+          ? nextText.slice(previousText.length)
+          : null,
+      });
     }
   }
 
-  return null;
+  return publishedTexts;
+}
+
+function updateTextPacing(
+  currentPacing: SmoothStreamingState["textPacingByMessageId"],
+  publishedTexts: ReturnType<typeof findPublishedTexts>,
+  nextMessages: AgUiMessage[],
+  publishedAtMs: number,
+) {
+  const nextPacing: SmoothStreamingState["textPacingByMessageId"] = {};
+  const smoothableMessageIds = new Set(
+    nextMessages.flatMap((message) =>
+      getSmoothableText(message) === null ? [] : [message.id],
+    ),
+  );
+
+  for (const messageId of smoothableMessageIds) {
+    const pacing = currentPacing[messageId];
+    if (pacing) {
+      nextPacing[messageId] = pacing;
+    }
+  }
+
+  for (const publishedText of publishedTexts) {
+    const current = currentPacing[publishedText.messageId];
+    const appendedGraphemes =
+      publishedText.appendedText === null
+        ? 0
+        : splitGraphemes(publishedText.appendedText).length;
+    const elapsedMs = current ? publishedAtMs - current.lastPublishedAtMs : 0;
+    let graphemesPerSecond = current?.graphemesPerSecond ?? null;
+
+    if (appendedGraphemes > 0 && elapsedMs > 0) {
+      const observedRate = Math.min(
+        MAX_GRAPHEMES_PER_SECOND,
+        Math.max(
+          MIN_GRAPHEMES_PER_SECOND,
+          appendedGraphemes * (1_000 / elapsedMs),
+        ),
+      );
+      graphemesPerSecond =
+        graphemesPerSecond === null
+          ? observedRate
+          : graphemesPerSecond * (1 - PACING_EMA_WEIGHT) +
+            observedRate * PACING_EMA_WEIGHT;
+    }
+
+    nextPacing[publishedText.messageId] = {
+      lastPublishedAtMs: publishedAtMs,
+      graphemesPerSecond,
+    };
+  }
+
+  return nextPacing;
 }
 
 function findPendingText(
@@ -348,6 +802,11 @@ function withTextContent(message: AgUiMessage, content: string) {
 
   throw new Error("Only assistant and reasoning messages can be smoothed");
 }
+
+const graphemeSegmenter =
+  typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
 
 function splitGraphemes(value: string) {
   if (!graphemeSegmenter) {
